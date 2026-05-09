@@ -7,17 +7,14 @@ import json
 import time
 import streamlit as st
 
+
 def save_transcript(messages: list, model_label: str, metadata: dict) -> bool:
     """
     Saves the interview transcript as a JSON file to Google Drive.
+    Shows a visible error in the sidebar if the save fails, so issues
+    are immediately diagnosable during testing.
 
-    Args:
-        messages:     Full message list from session state.
-        model_label:  "CLAUDE" or "OPENAI" — included in the filename.
-        metadata:     Dict of session metadata (start time, turn count, etc).
-
-    Returns:
-        True if saved successfully, False otherwise.
+    Returns True if saved successfully, False otherwise.
     """
     try:
         from google.oauth2 import service_account
@@ -25,10 +22,13 @@ def save_transcript(messages: list, model_label: str, metadata: dict) -> bool:
         from googleapiclient.http import MediaInMemoryUpload
 
         # Load credentials from Streamlit secrets
-        service_account_info = json.loads(
-            st.secrets["GDRIVE_SERVICE_ACCOUNT"]
-        )
-        folder_id = st.secrets["GDRIVE_FOLDER_ID"]
+        raw = st.secrets["GDRIVE_SERVICE_ACCOUNT"]
+
+        # Strip any leading/trailing whitespace that can break JSON parsing
+        raw = raw.strip()
+
+        service_account_info = json.loads(raw)
+        folder_id = st.secrets["GDRIVE_FOLDER_ID"].strip()
 
         credentials = service_account.Credentials.from_service_account_info(
             service_account_info,
@@ -73,13 +73,24 @@ def save_transcript(messages: list, model_label: str, metadata: dict) -> bool:
 
         return True
 
+    except json.JSONDecodeError as e:
+        st.sidebar.error(
+            f"❌ Transcript save failed — could not parse service account JSON.\n\n"
+            f"Check that GDRIVE_SERVICE_ACCOUNT in secrets is valid JSON.\n\n"
+            f"Detail: {e}"
+        )
+        return False
+
     except Exception as e:
-        # Log to Streamlit — visible in app logs but not to participant
-        print(f"[gdrive] Save failed: {e}")
+        st.sidebar.error(
+            f"❌ Transcript save failed.\n\n"
+            f"Error type: {type(e).__name__}\n\n"
+            f"Detail: {e}"
+        )
         return False
 
 
-def build_metadata(session_start: float, turn_count: int, 
+def build_metadata(session_start: float, turn_count: int,
                    safety_triggered: bool, complete: bool) -> dict:
     """Assembles session metadata for the transcript file."""
     return {
