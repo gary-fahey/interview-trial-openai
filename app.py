@@ -4,6 +4,8 @@
 #
 # Run locally:  streamlit run app.py
 # Deploy:       Streamlit Community Cloud (connect GitHub repo)
+# Note: OpenAI GPT-5.x models require the Responses API (client.responses.stream)
+#       Older models (gpt-4o, gpt-4o-mini) use Chat Completions as fallback.
 
 import time
 import streamlit as st
@@ -56,7 +58,6 @@ col_title, col_badge = st.columns([0.78, 0.22])
 with col_title:
     st.markdown("#### Research Interview")
 with col_badge:
-    # Model identity pill — always visible so reviewers know which version they are in
     colour = "#7F77DD" if API == "anthropic" else "#10A37F"
     st.markdown(
         f'<div style="background:{colour};color:white;padding:4px 10px;'
@@ -87,19 +88,71 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"], avatar=avatar):
         st.markdown(message["content"])
 
+
+# ── Helper: OpenAI streaming (Responses API with Chat Completions fallback) ───
+def openai_stream(system: str, messages: list) -> str:
+    """
+    Streams a response from OpenAI. Uses the Responses API for GPT-5.x models,
+    falls back to Chat Completions for older models (gpt-4o, gpt-4o-mini).
+    Must be called inside a st.chat_message block.
+    Returns the full response text.
+    """
+    model = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
+    placeholder = st.empty()
+    response_text = ""
+
+    try:
+        # Responses API — required for GPT-5.4, GPT-5.5 and newer
+        input_messages = [{"role": "system", "content": system}] + messages
+        with client.responses.stream(
+            model=model,
+            input=input_messages,
+            max_output_tokens=config.MAX_OUTPUT_TOKENS,
+        ) as stream:
+            for event in stream:
+                if hasattr(event, "type"):
+                    if event.type == "response.output_text.delta":
+                        delta = event.delta
+                        if delta:
+                            response_text += delta
+                            if "INTERVIEW_COMPLETE" not in response_text:
+                                placeholder.markdown(response_text + "▌")
+
+    except Exception:
+        # Fallback: Chat Completions API for older models
+        response_text = ""
+        openai_messages = [{"role": "system", "content": system}] + messages
+        stream = client.chat.completions.create(
+            model=model,
+            max_completion_tokens=config.MAX_OUTPUT_TOKENS,
+            messages=openai_messages,
+            stream=True,
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                response_text += delta
+                if "INTERVIEW_COMPLETE" not in response_text:
+                    placeholder.markdown(response_text + "▌")
+
+    placeholder.markdown(
+        response_text.replace("INTERVIEW_COMPLETE", "").strip()
+    )
+    return response_text
+
+
 # ── First message: AI opens the interview ─────────────────────────────────────
 if not st.session_state.messages:
     system_prompt = logic.build_system_prompt(MODEL_DISPLAY)
 
     with st.chat_message("assistant", avatar=config.AVATAR_INTERVIEWER):
-        placeholder = st.empty()
-        opening_text = ""
 
         if API == "anthropic":
-            # Anthropic requires at least one user message
+            placeholder = st.empty()
+            opening_text = ""
             seed_messages = [{"role": "user", "content": "Please begin the interview."}]
             with client.messages.stream(
-                model=st.secrets.get("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
+                model=st.secrets.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
                 max_tokens=config.MAX_OUTPUT_TOKENS,
                 system=system_prompt,
                 messages=seed_messages,
@@ -110,22 +163,8 @@ if not st.session_state.messages:
             placeholder.markdown(opening_text)
 
         elif API == "openai":
-            seed_messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": "Please begin the interview."}
-            ]
-            stream = client.chat.completions.create(
-                model=st.secrets.get("OPENAI_MODEL", "gpt-5.4-mini"),
-                max_tokens=config.MAX_OUTPUT_TOKENS,
-                messages=seed_messages,
-                stream=True,
-            )
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    opening_text += delta
-                    placeholder.markdown(opening_text + "▌")
-            placeholder.markdown(opening_text)
+            seed_messages = [{"role": "user", "content": "Please begin the interview."}]
+            opening_text = openai_stream(system_prompt, seed_messages)
 
     st.session_state.messages.append({
         "role": "assistant",
@@ -138,7 +177,6 @@ if user_input := st.chat_input("Type your response here..."):
     # Safety screening — runs before anything else
     if logic.check_safety(user_input):
         st.session_state.safety_triggered = True
-        # Save transcript with safety flag
         metadata = gdrive.build_metadata(
             st.session_state.session_start,
             st.session_state.turn_count,
@@ -164,16 +202,16 @@ if user_input := st.chat_input("Type your response here..."):
 
     # Build system prompt for current module
     system_prompt = logic.build_system_prompt(MODEL_DISPLAY)
-    api_messages   = logic.get_api_messages()
+    api_messages = logic.get_api_messages()
 
     # Generate AI response
     with st.chat_message("assistant", avatar=config.AVATAR_INTERVIEWER):
-        placeholder = st.empty()
-        ai_response = ""
 
         if API == "anthropic":
+            placeholder = st.empty()
+            ai_response = ""
             with client.messages.stream(
-                model=st.secrets.get("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
+                model=st.secrets.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
                 max_tokens=config.MAX_OUTPUT_TOKENS,
                 system=system_prompt,
                 messages=api_messages,
@@ -187,24 +225,7 @@ if user_input := st.chat_input("Type your response here..."):
             )
 
         elif API == "openai":
-            openai_messages = [
-                {"role": "system", "content": system_prompt}
-            ] + api_messages
-            stream = client.chat.completions.create(
-                model=st.secrets.get("OPENAI_MODEL", "gpt-5.4-mini"),
-                max_tokens=config.MAX_OUTPUT_TOKENS,
-                messages=openai_messages,
-                stream=True,
-            )
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    ai_response += delta
-                    if "INTERVIEW_COMPLETE" not in ai_response:
-                        placeholder.markdown(ai_response + "▌")
-            placeholder.markdown(
-                ai_response.replace("INTERVIEW_COMPLETE", "").strip()
-            )
+            ai_response = openai_stream(system_prompt, api_messages)
 
     # Store AI response
     st.session_state.messages.append({
@@ -215,7 +236,7 @@ if user_input := st.chat_input("Type your response here..."):
     # Check for module advancement or completion
     logic.advance_module_if_needed(ai_response)
 
-    # If a new module has an opening question, inject it now as the AI's first message
+    # If a new module has an opening question, inject it now
     new_module = st.session_state.current_module
     new_module_data = config.INTERVIEW_MODULES.get(new_module, {})
     opening_q = new_module_data.get("opening_question")
@@ -226,7 +247,6 @@ if user_input := st.chat_input("Type your response here..."):
         and new_module != "orientation"
         and new_module != "summary"
     ):
-        # Only inject if this opening question has not already been injected
         already_injected = any(
             opening_q in m.get("content", "")
             for m in st.session_state.messages
