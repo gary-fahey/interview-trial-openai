@@ -115,7 +115,7 @@ if not st.session_state.messages:
                 {"role": "user", "content": "Please begin the interview."}
             ]
             stream = client.chat.completions.create(
-                model=st.secrets.get("OPENAI_MODEL", "gpt-4o-mini"),
+                model=st.secrets.get("OPENAI_MODEL", "gpt-5.4-mini"),
                 max_tokens=config.MAX_OUTPUT_TOKENS,
                 messages=seed_messages,
                 stream=True,
@@ -191,7 +191,7 @@ if user_input := st.chat_input("Type your response here..."):
                 {"role": "system", "content": system_prompt}
             ] + api_messages
             stream = client.chat.completions.create(
-                model=st.secrets.get("OPENAI_MODEL", "gpt-4o-mini"),
+                model=st.secrets.get("OPENAI_MODEL", "gpt-5.4-mini"),
                 max_tokens=config.MAX_OUTPUT_TOKENS,
                 messages=openai_messages,
                 stream=True,
